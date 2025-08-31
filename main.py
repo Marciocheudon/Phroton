@@ -68,6 +68,7 @@ class Finding:
     payloads: List[str]  # MODIFICADO: agora é uma lista de payloads específicos
     fix: str
     references: List[str]
+    origin: str | None = None
 
     def to_dict(self) -> Dict[str, Any]:
         return dataclasses.asdict(self)
@@ -126,6 +127,7 @@ class _JSCollector(HTMLParser):
             self._current_has_src = False
 
 
+
 def _save_bytes_safely(base: Path, rel_name: str, data: bytes) -> Path:
     # Normaliza caminho e evita travessia
     safe_name = rel_name.strip().lstrip("/")
@@ -137,6 +139,32 @@ def _save_bytes_safely(base: Path, rel_name: str, data: bytes) -> Path:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_bytes(data)
     return out_path
+
+
+# === Helpers para origem dos arquivos JS ===
+def _load_sources_map(root: Path) -> Dict[str, Any]:
+    try:
+        p = root / "assets" / "js" / "_sources.json"
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _resolve_origin_for(root: Path, rel_path: str) -> str | None:
+    m = _load_sources_map(root)
+    key = rel_path.replace("\\", "/")
+    entry = m.get(key)
+    if not entry:
+        return None
+    t = entry.get("type")
+    if t == "inline":
+        idx = entry.get("index", "?")
+        return f"inline #{idx} em page.html"
+    if t == "external":
+        src = entry.get("src", "?")
+        resolved = entry.get("resolved", "?")
+        return f"script src=\"{src}\" em page.html (resolvido: {resolved})"
+    return None
 
 
 def download_single_page(url: str, dst_dir: Path, include_third_party: bool = False) -> Path:
@@ -160,6 +188,7 @@ def download_single_page(url: str, dst_dir: Path, include_third_party: bool = Fa
     base = f"{urlparse(url).scheme}://{urlparse(url).netloc}"
     assets_base = dst_dir / "assets" / "js"
 
+    sources: Dict[str, Any] = {}
     saved = 0
     # Scripts externos
     for src in parser.external:
@@ -176,7 +205,14 @@ def download_single_page(url: str, dst_dir: Path, include_third_party: bool = Fa
             rel = ("js" + path) if path.startswith("/") else ("js/" + path)
             if not rel.lower().endswith((".js", ".mjs")):
                 rel = rel.rstrip("/") + ".js"
-            _save_bytes_safely(assets_base, rel.lstrip("/"), resp.content)
+            saved_path = _save_bytes_safely(assets_base, rel.lstrip("/"), resp.content)
+            rel_saved = str(saved_path.relative_to(dst_dir))
+            sources[rel_saved] = {
+                "type": "external",
+                "from_html": "page.html",
+                "src": src,
+                "resolved": full,
+            }
             saved += 1
         except Exception:
             continue
@@ -185,10 +221,22 @@ def download_single_page(url: str, dst_dir: Path, include_third_party: bool = Fa
     for i, content in enumerate(parser.inline, start=1):
         name = f"inline_{i}.js"
         try:
-            _save_bytes_safely(assets_base, name, content.encode("utf-8", errors="ignore"))
+            saved_path = _save_bytes_safely(assets_base, name, content.encode("utf-8", errors="ignore"))
+            rel_saved = str(saved_path.relative_to(dst_dir))
+            sources[rel_saved] = {
+                "type": "inline",
+                "from_html": "page.html",
+                "index": i,
+            }
             saved += 1
         except Exception:
             continue
+
+    try:
+        (assets_base).mkdir(parents=True, exist_ok=True)
+        (assets_base / "_sources.json").write_text(json.dumps(sources, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
 
     print(f"[info] HTML salvo e {saved} script(s) coletado(s)")
     return dst_dir
@@ -330,6 +378,7 @@ def safe_json_parse(text: str) -> List[Dict[str, Any]]:
 
 def audit_file(model: str, root: Path, file_path: Path) -> List[Finding]:
     rel = str(file_path.relative_to(root))
+    origin_info = _resolve_origin_for(root, rel)
     try:
         content = file_path.read_text(encoding="utf-8", errors="ignore")
     except Exception:
@@ -365,6 +414,7 @@ def audit_file(model: str, root: Path, file_path: Path) -> List[Finding]:
                     payloads=list(it.get("payloads", []) or []),  # MODIFICADO
                     fix=str(it.get("fix", "")),
                     references=list(it.get("references", []) or []),
+                    origin=origin_info,
                 ))
             except Exception:
                 continue
@@ -393,6 +443,10 @@ def generate_report(findings: List[Finding]) -> str:
         lines += [
             f"## {f.title} ({f.severity})",
             f"**Arquivo:** {f.file_path}",
+        ]
+        if f.origin:
+            lines.append(f"**Origem do input:** {f.origin}")
+        lines += [
             f"**Linhas:** {f.line_start or '?'}–{f.line_end or '?'}",
             f"**CWE:** {f.cwe or '—'}",
             "",
