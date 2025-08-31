@@ -1,0 +1,4 @@
+cd /Users/cheudon/phroton
+python3 main.py <URL_DO_REPO_OU_PAGINA> --model "<nome-do-modelo-no-ollama>"
+# Exemplo:
+python3 main.py https://github.com/org/proj.git --model "devstral:24b"

@@ -1,0 +1,3 @@
+pip install requests
+# git precisa estar instalado
+# Ollama rodando localmente: https://ollama.com
