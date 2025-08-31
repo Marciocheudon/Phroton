@@ -226,9 +226,46 @@ def chunk_text(text: str, chunk_bytes: int = CHUNK_BYTES, overlap: int = CHUNK_O
     return [c.decode("utf-8", errors="ignore") for c in chunks]
 
 
+
 # =============================
 # Ollama
 # =============================
+
+def _notify_done() -> None:
+    """Toca um efeito sonoro ao finalizar a análise (multi-plataforma)."""
+    try:
+        # macOS
+        if sys.platform == "darwin":
+            # Som do sistema; não falha caso o utilitário não exista
+            subprocess.run(["afplay", "/System/Library/Sounds/Glass.aiff"], check=False)
+            return
+        # Linux
+        if sys.platform.startswith("linux"):
+            # Tenta paplay/aplay; se não houver, cai no beep do terminal
+            for cmd in (
+                ["paplay", "/usr/share/sounds/freedesktop/stereo/complete.oga"],
+                ["aplay", "/usr/share/sounds/alsa/Front_Center.wav"],
+            ):
+                try:
+                    subprocess.run(cmd, check=False)
+                    return
+                except Exception:
+                    pass
+            # Beep do terminal
+            print("\a", end="", flush=True)
+            return
+        # Windows
+        if sys.platform.startswith("win"):
+            try:
+                import winsound  # type: ignore
+                winsound.MessageBeep()
+                return
+            except Exception:
+                pass
+    except Exception:
+        pass
+    # Fallback universal: beep do terminal
+    print("\a", end="", flush=True)
 
 def ollama_generate(model: str, prompt: str) -> str:
     url = f"{OLLAMA_HOST}/api/generate"
@@ -452,6 +489,7 @@ def main() -> int:
 
     print(f"[ok] Relatório salvo em {args.out}")
     print(f"[ok] JSON salvo em {args.json_out}")
+    _notify_done()
 
     # limpeza
     try:
