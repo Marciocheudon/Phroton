@@ -45,6 +45,7 @@ MAX_FILE_BYTES = int(os.environ.get("PHROTON_MAX_FILE_BYTES", str(400_000)))  # 
 CHUNK_BYTES = int(os.environ.get("PHROTON_CHUNK_BYTES", str(24_000)))  # ~24KB por chunk
 CHUNK_OVERLAP = int(os.environ.get("PHROTON_CHUNK_OVERLAP", str(512)))
 REQUEST_TIMEOUT = int(os.environ.get("PHROTON_TIMEOUT", str(120)))
+_GLOBAL_RETRIES = 2  # valor padrão; pode ser sobrescrito via CLI
 CODE_EXTS = {
     ".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".rs", ".java", ".kt", ".kts",
     ".cs", ".cpp", ".cc", ".c", ".h", ".hpp", ".m", ".mm", ".swift",
@@ -546,6 +547,8 @@ def filter_by_severity_min(items: List[Finding], min_level: str | None) -> List[
 
 
 def main() -> int:
+    global REQUEST_TIMEOUT
+    global _GLOBAL_RETRIES
     parser = argparse.ArgumentParser(description="Auditoria estática de código com Ollama")
     parser.add_argument("url", help="URL do repositório Git ou página com código")
     parser.add_argument("--model", default=DEFAULT_MODEL, help="Nome do modelo no Ollama")
@@ -566,9 +569,7 @@ def main() -> int:
     workdir = tmp / "work"
     workdir.mkdir(parents=True, exist_ok=True)
 
-    global REQUEST_TIMEOUT
     REQUEST_TIMEOUT = int(args.timeout)
-    global _GLOBAL_RETRIES
     _GLOBAL_RETRIES = int(args.retries)
 
     print(f"[info] Preparando fonte em {workdir}")
