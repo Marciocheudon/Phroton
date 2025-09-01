@@ -2,3 +2,13 @@ cd /Users/cheudon/phroton
 python3 main.py <URL_DO_REPO_OU_PAGINA> --model "<nome-do-modelo-no-ollama>"
 # Exemplo:
 python3 main.py https://github.com/org/proj.git --model "devstral:24b"
+
+Exemplos:
+	•	Paralelizar com 8 threads, aumentar timeout e fazer 3 tentativas:
+
+    ./main.py https://exemplo.com --workers 8 --timeout 300 --retries 3
+
+    •	Filtrar só vulnerabilidades High+:
+    ./main.py https://github.com/psf/requests.git --severity-min High
+
+    

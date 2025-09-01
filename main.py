@@ -26,6 +26,7 @@ import tempfile
 import time
 from pathlib import Path
 from typing import Iterable, List, Dict, Any
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urljoin, urlparse
 from html.parser import HTMLParser
 
@@ -52,6 +53,14 @@ CODE_EXTS = {
 }
 
 GIT_HOST_HINT = re.compile(r"(github|gitlab|bitbucket)\.(com|org)", re.IGNORECASE)
+
+# Severidade ranking e helper
+SEV_RANK = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3, "Info": 4}
+
+def parse_severity(s: str | None) -> int:
+    if not s:
+        return 5
+    return SEV_RANK.get(s, 5)
 
 
 @dataclasses.dataclass
@@ -84,6 +93,44 @@ def is_probably_git_repo(url: str) -> bool:
 
 def run(cmd: List[str], cwd: str | None = None) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, cwd=cwd, check=True, text=True, capture_output=True)
+
+
+# HTTP helpers with retry/backoff
+def _sleep_backoff(attempt: int) -> None:
+    try:
+        time.sleep(min(1 + attempt, 5))
+    except Exception:
+        pass
+
+
+def http_get(url: str, *, timeout: int, retries: int = 2) -> requests.Response:
+    last = None
+    for i in range(retries + 1):
+        try:
+            r = requests.get(url, timeout=timeout)
+            r.raise_for_status()
+            return r
+        except Exception as e:
+            last = e
+            if i < retries:
+                _sleep_backoff(i)
+                continue
+            raise last
+
+
+def http_post(url: str, *, json_payload: Dict[str, Any], timeout: int, retries: int = 1) -> requests.Response:
+    last = None
+    for i in range(retries + 1):
+        try:
+            r = requests.post(url, json=json_payload, timeout=timeout)
+            r.raise_for_status()
+            return r
+        except Exception as e:
+            last = e
+            if i < retries:
+                _sleep_backoff(i)
+                continue
+            raise last
 
 
 def clone_repo(url: str, dst: Path) -> Path:
@@ -173,7 +220,7 @@ def download_single_page(url: str, dst_dir: Path, include_third_party: bool = Fa
     - Salva scripts externos em assets/js/...
     - Salva scripts inline como assets/js/inline_*.js
     """
-    r = requests.get(url, timeout=REQUEST_TIMEOUT)
+    r = http_get(url, timeout=REQUEST_TIMEOUT, retries=_GLOBAL_RETRIES)
     r.raise_for_status()
     html_bytes = r.content
     (dst_dir / "page.html").write_bytes(html_bytes)
@@ -198,7 +245,7 @@ def download_single_page(url: str, dst_dir: Path, include_third_party: bool = Fa
             if urlparse(full).netloc != urlparse(base).netloc:
                 continue
         try:
-            resp = requests.get(full, timeout=REQUEST_TIMEOUT)
+            resp = http_get(full, timeout=REQUEST_TIMEOUT, retries=_GLOBAL_RETRIES)
             resp.raise_for_status()
             path = urlparse(full).path or "/script.js"
             # Gera um caminho relativo limpo
@@ -326,7 +373,7 @@ def ollama_generate(model: str, prompt: str) -> str:
             "temperature": 0.4,
         },
     }
-    resp = requests.post(url, json=payload, timeout=REQUEST_TIMEOUT)
+    resp = http_post(url, json_payload=payload, timeout=REQUEST_TIMEOUT, retries=_GLOBAL_RETRIES)
     resp.raise_for_status()
     data = resp.json()
     return data.get("response", "").strip()
@@ -425,8 +472,7 @@ def generate_report(findings: List[Finding]) -> str:
     if not findings:
         return "# Relatório de Auditoria\n\nNenhum achado encontrado nos trechos analisados.\n"
     # ordenar por severidade
-    sev_rank = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3, "Info": 4}
-    findings_sorted = sorted(findings, key=lambda f: (sev_rank.get(f.severity, 5), f.file_path))
+    findings_sorted = sorted(findings, key=lambda f: (parse_severity(f.severity), f.file_path))
 
     lines = ["# Relatório de Auditoria", ""]
     summary: Dict[str, int] = {}
@@ -479,6 +525,26 @@ def generate_report(findings: List[Finding]) -> str:
     return "\n".join(lines)
 
 
+# Deduplication and severity filter helpers
+def dedup_findings(items: List[Finding]) -> List[Finding]:
+    seen: set[tuple] = set()
+    out: List[Finding] = []
+    for f in items:
+        key = (f.file_path, f.title, f.line_start, f.line_end, f.severity)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(f)
+    return out
+
+
+def filter_by_severity_min(items: List[Finding], min_level: str | None) -> List[Finding]:
+    if not min_level:
+        return items
+    threshold = parse_severity(min_level)
+    return [f for f in items if parse_severity(f.severity) <= threshold]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Auditoria estática de código com Ollama")
     parser.add_argument("url", help="URL do repositório Git ou página com código")
@@ -488,12 +554,22 @@ def main() -> int:
     parser.add_argument("--include", nargs="*", default=None, help="Glob patterns para incluir (ex: 'src/**/*.py')")
     parser.add_argument("--exclude", nargs="*", default=["**/.git/**", "**/node_modules/**", "**/dist/**", "**/build/**"], help="Glob patterns para excluir")
     parser.add_argument("--include-third-party", action="store_true", help="Também baixar JS de terceiros (CDNs/outros domínios)")
+    parser.add_argument("--workers", type=int, default=max(1, os.cpu_count() or 1), help="Número de threads para análise paralela")
+    parser.add_argument("--timeout", type=int, default=REQUEST_TIMEOUT, help="Timeout de rede/inferência (s)")
+    parser.add_argument("--retries", type=int, default=2, help="Tentativas extras para downloads/API")
+    parser.add_argument("--severity-min", default=None, choices=["Critical","High","Medium","Low","Info"], help="Filtrar achados com severidade mínima")
+    parser.add_argument("--no-sound", action="store_true", help="Não tocar som ao finalizar")
 
     args = parser.parse_args()
 
     tmp = Path(tempfile.mkdtemp(prefix="phroton_"))
     workdir = tmp / "work"
     workdir.mkdir(parents=True, exist_ok=True)
+
+    global REQUEST_TIMEOUT
+    REQUEST_TIMEOUT = int(args.timeout)
+    global _GLOBAL_RETRIES
+    _GLOBAL_RETRIES = int(args.retries)
 
     print(f"[info] Preparando fonte em {workdir}")
     try:
@@ -525,16 +601,23 @@ def main() -> int:
 
     print(f"[info] Arquivos para análise: {len(all_files)}")
     total_findings: List[Finding] = []
+    futures = {}
+    with ThreadPoolExecutor(max_workers=max(1, args.workers)) as ex:
+        for fp in all_files:
+            rel = str(fp.relative_to(workdir))
+            print(f"[scan] {rel}")
+            futures[ex.submit(audit_file, args.model, workdir, fp)] = rel
+        for fut in as_completed(futures):
+            rel = futures[fut]
+            try:
+                fnds = fut.result()
+                total_findings.extend(fnds)
+            except Exception as e:
+                print(f"[warn] Falha ao analisar {rel}: {e}", file=sys.stderr)
+                continue
 
-    for fp in all_files:
-        rel = str(fp.relative_to(workdir))
-        print(f"[scan] {rel}")
-        try:
-            fnds = audit_file(args.model, workdir, fp)
-        except Exception as e:
-            print(f"[warn] Falha ao analisar {rel}: {e}", file=sys.stderr)
-            continue
-        total_findings.extend(fnds)
+    total_findings = dedup_findings(total_findings)
+    total_findings = filter_by_severity_min(total_findings, args.severity_min)
 
     # Exporta
     report_md = generate_report(total_findings)
@@ -543,7 +626,8 @@ def main() -> int:
 
     print(f"[ok] Relatório salvo em {args.out}")
     print(f"[ok] JSON salvo em {args.json_out}")
-    _notify_done()
+    if not args.no_sound:
+        _notify_done()
 
     # limpeza
     try:
