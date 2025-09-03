@@ -3,8 +3,7 @@
 phroton – Auditoria estática de código via Ollama
 
 Funciona assim:
-1) Recebe uma URL. Se for repositório Git (GitHub/GitLab/Bitbucket ou *.git), clona para um diretório temporário.
-   Caso contrário, faz download do HTML e coleta scripts JS (mesma origem por padrão; opção para incluir terceiros).
+1) Recebe uma URL de página web, faz download do HTML e coleta scripts JS (mesma origem por padrão; opção para incluir terceiros).
 2) Varre os arquivos de código (extensões comuns) e cria chunks.
 3) Para cada chunk, chama o modelo local no Ollama (http://localhost:11434) com um prompt de auditoria seguro.
 4) Consolida os achados em JSON e gera um relatório Markdown.
@@ -53,7 +52,6 @@ CODE_EXTS = {
     ".json", ".gradle", ".dockerfile", ".docker", ".env", ".cfg", ".mjs"
 }
 
-GIT_HOST_HINT = re.compile(r"(github|gitlab|bitbucket)\.(com|org)", re.IGNORECASE)
 
 # Severidade ranking e helper
 SEV_RANK = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3, "Info": 4}
@@ -88,12 +86,6 @@ class Finding:
 # Utilitários
 # =============================
 
-def is_probably_git_repo(url: str) -> bool:
-    return url.endswith(".git") or GIT_HOST_HINT.search(url) is not None
-
-
-def run(cmd: List[str], cwd: str | None = None) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, cwd=cwd, check=True, text=True, capture_output=True)
 
 
 # HTTP helpers with retry/backoff
@@ -134,10 +126,6 @@ def http_post(url: str, *, json_payload: Dict[str, Any], timeout: int, retries: 
             raise last
 
 
-def clone_repo(url: str, dst: Path) -> Path:
-    run(["git", "--version"])  # valida git instalado
-    run(["git", "clone", "--depth", "1", url, str(dst)])
-    return dst
 
 
 class _JSCollector(HTMLParser):
@@ -550,7 +538,7 @@ def main() -> int:
     global REQUEST_TIMEOUT
     global _GLOBAL_RETRIES
     parser = argparse.ArgumentParser(description="Auditoria estática de código com Ollama")
-    parser.add_argument("url", help="URL do repositório Git ou página com código")
+    parser.add_argument("url", help="URL de uma página (website) para análise")
     parser.add_argument("--model", default=DEFAULT_MODEL, help="Nome do modelo no Ollama")
     parser.add_argument("--out", default="report.md", help="Arquivo de saída (Markdown)")
     parser.add_argument("--json", dest="json_out", default="findings.json", help="Arquivo JSON com os achados")
@@ -574,15 +562,8 @@ def main() -> int:
 
     print(f"[info] Preparando fonte em {workdir}")
     try:
-        if is_probably_git_repo(args.url):
-            print("[info] Detectado repositório git, clonando...")
-            clone_repo(args.url, workdir)
-        else:
-            print("[info] Baixando página simples (modo limitado)...")
-            download_single_page(args.url, workdir, include_third_party=args.include_third_party)
-    except subprocess.CalledProcessError as e:
-        print(f"[erro] Falha ao executar git: {e.stderr}", file=sys.stderr)
-        return 2
+        print("[info] Baixando página (modo websites)...")
+        download_single_page(args.url, workdir, include_third_party=args.include_third_party)
     except Exception as e:
         print(f"[erro] Falha ao preparar fonte: {e}", file=sys.stderr)
         return 2
